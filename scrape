@@ -1,0 +1,125 @@
+#!/usr/bin/env ruby
+
+require 'mechanize'
+require 'awesome_print'
+require 'sqlite3'
+
+class Scraper
+  class << self
+    def scrape_page(page)
+      page.search('.post').map { |post| scrape_post(post) }
+    end
+
+    def next_page(page)
+      page.search('.blog-pager-older-link').first.attributes['title'].value
+    end
+
+    def scrape_post(post)
+      {
+        artist: scrape_artist(post),
+        title: scrape_title(post),
+        listen_link: scrape_listen_link(post),
+        post_link: scrape_post_link(post),
+        tags: scrape_tags(post),
+        created_at: scrape_created_at(post)
+      }
+    end
+
+    def scrape_artist(post)
+      title = post.search('.post-title').text.strip
+      if title =~ /\w+\s*-\s*\w+/
+        post.search('.post-title').text.strip.split('-').first.strip
+      else
+        title
+      end
+    end
+
+    def scrape_title(post)
+      title = post.search('.post-title').text.strip
+      if title =~ /\w+\s*-\s*\w+/
+        post.search('.post-title').text.strip.split('-').last.strip
+      else
+        title
+      end
+    end
+
+    def scrape_listen_link(post)
+      iframe = post.search('.post-body iframe').first
+      iframe.attributes['src'].value if iframe
+    end
+
+    def scrape_post_link(post)
+      post_link = post.search('.post-title a').first
+      if post_link.respond_to? :attributes
+        post_link.attributes['href'].value if post_link.attributes['href']
+      end
+    end
+
+    def scrape_created_at(post)
+      post.search('.timestamp-link .published').first.attributes['title'].value
+    end
+
+    def scrape_tags(post)
+      post.search('.post-labels a').map(&:text).join(',')
+    end
+
+    def backup(posts)
+      db = SQLite3::Database.new 'songs.db'
+
+      db.execute 'drop table if exists songs;'
+      db.execute <<-SQL
+        create table songs(
+          id INTEGER PRIMARY KEY,
+          artist TEXT,
+          title TEXT,
+          listen_link TEXT UNIQUE,
+          post_link TEXT UNIQUE,
+          tags TEXT,
+          created_at TEXT
+        );
+      SQL
+
+      posts.each do |post|
+        begin
+          sql = <<-SQL
+            insert into songs
+              (artist, title, listen_link, post_link, tags, created_at)
+              values (?, ?, ?, ?, ?, ?)
+          SQL
+
+          db.execute sql, post.values
+        rescue
+          next
+        end
+      end
+    end
+  end
+end
+
+abort 'Missing blog url argument, usage: scraper http://example.blog' if ARGV.empty?
+BLOG_URL = ARGV[0]
+
+posts = []
+pager = 1
+
+a = Mechanize.new
+a.get BLOG_URL do |page|
+  posts.concat Scraper.scrape_page(page)
+  next_page = page
+  puts "Scraped page #{pager}"
+
+  begin
+    next_page_link = next_page.link_with dom_class: 'blog-pager-older-link'
+
+    break if next_page_link.nil?
+
+    next_page = a.click(next_page_link)
+
+    posts.concat Scraper.scrape_page(next_page)
+    pager += 1
+
+    puts "Scraped page #{pager}"
+  end while next_page
+end
+
+Scraper.backup posts
